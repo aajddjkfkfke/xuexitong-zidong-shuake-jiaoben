@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通自动刷课脚本
 // @namespace    github.aajddjkfkfke.xuexitong
-// @version      1.0.2
+// @version      1.0.3
 // @description  学习通视频自动播放 + 章节测验 DeepSeek 作答；右侧可视化面板，API Key 保存在油猴本地存储，无需本地服务与 F12 控制台
 // @author       aajddjkfkfke
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -26,7 +26,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.0.2';
+    const VERSION = '1.0.3';
     const BOOT_KEY = '__xuexitongDeepSeekPanelBooted';
     const API_URL = 'https://api.deepseek.com/chat/completions';
     const MODELS_URL = 'https://api.deepseek.com/models';
@@ -682,7 +682,7 @@
     }
 
     async function requestAnswers(questions, hint = '') {
-        const apiKey = clean(settings.apiKey);
+        const apiKey = currentApiKey();
         if (!apiKey) throw new Error('未填写 DeepSeek API Key，请在面板顶部保存后再开始答题');
         const body = buildRequestBody(questions, hint);
         let lastProblem = '';
@@ -1496,6 +1496,22 @@
                         }
                         return;
                     }
+                    if (!currentApiKey()) {
+                        if (!this._inlineKeyWarned) {
+                            this._inlineKeyWarned = true;
+                            log('warn', '视频弹题需要 DeepSeek API Key：请在面板顶部输入并保存，脚本会自动继续');
+                        }
+                        const pendingVideo = this._getVideoEl();
+                        if (pendingVideo && !pendingVideo.paused) {
+                            try {
+                                pendingVideo.pause();
+                            } catch (error) {
+                                /* 忽略 */
+                            }
+                        }
+                        return;
+                    }
+                    this._inlineKeyWarned = false;
                     const signature = questions.map((question) => `${question.kind}:${question.title}:${question.options.length}`).join('|');
                     const attempts = this._inlineAttempts.get(signature) || 0;
                     if (attempts >= 3) return;
@@ -1639,6 +1655,7 @@
             _inlineAttempts: new Map(),
             _inlineAnswerCache: new Map(),
             _inlineStructureWarned: false,
+            _inlineKeyWarned: false,
             _guardLastTime: 0,
             _guardLastWallTs: 0,
             _guardLastResumeTs: 0,
@@ -2344,6 +2361,10 @@
             }
             event.stopPropagation();
         });
+        ui.keyEl.addEventListener('input', () => {
+            settings.apiKey = String(ui.keyEl.value || '').trim();
+            if (state.app) state.app._inlineKeyWarned = false;
+        });
         ui.autoQuizEl.addEventListener('change', () => {
             settings.autoQuiz = ui.autoQuizEl.checked;
             storage.set('autoQuiz', settings.autoQuiz);
@@ -2462,10 +2483,16 @@
         else if (action === 'hide') toggleVisible();
     }
 
+    function currentApiKey() {
+        const typed = ui && ui.keyEl ? String(ui.keyEl.value || '').trim() : '';
+        return typed || clean(settings.apiKey);
+    }
+
     function saveKey() {
         const value = String(ui.keyEl.value || '').trim();
         settings.apiKey = value;
         storage.set('apiKey', value);
+        if (state.app) state.app._inlineKeyWarned = false;
         log(value ? 'success' : 'warn', value ? 'API Key 已保存到本机油猴存储' : '已清空 API Key');
         setActivity(value ? 'API Key 已保存' : '未设置 API Key');
     }

@@ -1,8 +1,8 @@
 {
-  "name": "xuexitong-deepseek-assistant",
+  "name": "xuexitong-auto-course",
   "version": "1.0.0",
   "private": true,
-  "description": "学习通视频自动播放与章节测验 DeepSeek 作答的可视化油猴脚本",
+  "description": "学习通自动刷课脚本",
   "scripts": {
     "test": "node tests/verify-deepseek-userscript.mjs && node tests/verify-font-decoder.mjs"
   }

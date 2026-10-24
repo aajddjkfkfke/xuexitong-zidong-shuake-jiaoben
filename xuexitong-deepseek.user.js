@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         学习通 DeepSeek 助手（可视化面板）
+// @name         学习通自动刷课脚本
 // @namespace    github.aajddjkfkfke.xuexitong
 // @version      1.0
 // @description  学习通视频自动播放 + 章节测验 DeepSeek 作答；右侧可视化面板，API Key 保存在油猴本地存储，无需本地服务与 F12 控制台
@@ -1291,7 +1291,7 @@
                 return this._cellData;
             },
             run() {
-                log('success', '=== 学习通 DeepSeek 助手已启动 ===');
+                log('success', '=== 学习通自动刷课已启动 ===');
                 this._nextUnitPending = false;
                 this._chapterAdvanceTimes = 0;
                 this._getTreeContainer();
@@ -1953,7 +1953,7 @@
         <div class="panel" id="panel">
             <div class="head" id="drag">
                 <span class="dot" id="dot"></span>
-                <span class="title">学习通 · DeepSeek</span>
+                <span class="title">学习通自动刷课</span>
                 <span class="ver">v${VERSION}</span>
                 <span class="spacer"></span>
                 <button class="icon" data-act="min" title="最小化">–</button>

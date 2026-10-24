@@ -1,6 +1,6 @@
 {
   "name": "xuexitong-zidong-shuake-jiaoben",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "description": "学习通自动刷课脚本",
   "scripts": {

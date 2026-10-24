@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通自动刷课脚本
 // @namespace    github.aajddjkfkfke.xuexitong
-// @version      1.0.5
+// @version      1.0.6
 // @description  学习通视频自动播放 + 章节测验 DeepSeek 作答；右侧可视化面板，API Key 保存在油猴本地存储，无需本地服务与 F12 控制台
 // @author       aajddjkfkfke
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -26,7 +26,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.0.5';
+    const VERSION = '1.0.6';
     const BOOT_KEY = '__xuexitongDeepSeekPanelBooted';
     const API_URL = 'https://api.deepseek.com/chat/completions';
     const MODELS_URL = 'https://api.deepseek.com/models';
@@ -918,6 +918,36 @@
         return clickable[0] || null;
     }
 
+    function clickElement(element) {
+        if (!element) return;
+        try {
+            element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+            element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+        } catch (error) {
+            /* 忽略 */
+        }
+        try {
+            element.click();
+        } catch (error) {
+            /* 忽略 */
+        }
+    }
+
+    function currentActiveCell() {
+        try {
+            const active = document.querySelector('#coursetree .posCatalog_active');
+            if (!active) return '';
+            const chapter = active.closest('li');
+            if (!chapter) return '';
+            const chapters = Array.from(chapter.parentElement.children);
+            const chapterIndex = chapters.indexOf(chapter);
+            const cells = Array.from(chapter.querySelectorAll('.posCatalog_select:not(.firstLayer)'));
+            return `${chapterIndex}:${cells.indexOf(active)}`;
+        } catch (error) {
+            return '';
+        }
+    }
+
     function extractQuestionNearSubmit(submit) {
         let container = submit?.parentElement;
         for (let depth = 0; depth < 6 && container; depth++, container = container.parentElement) {
@@ -1232,14 +1262,17 @@
             if (!next) throw new Error('未找到页面下方的“下一节”按钮');
             app._nextUnitPending = true;
             const previousStep = app._currentStepTitle();
+            const previousCell = currentActiveCell();
             app._clearCheckInterval();
             app._videoEl = null;
             app._isPlaying = false;
             next.scrollIntoView({ block: 'center' });
             log('info', `${previousStep || '当前学习步骤'}完成，点击页面“下一节”，等待新内容加载`);
-            next.click();
+            clickElement(next);
             let currentStep = '';
             let stepReady = false;
+            let retries = 0;
+            let lastClickAt = Date.now();
             for (let attempt = 0; attempt < 480; attempt++) {
                 if (stopped) throw new Error('脚本已停止');
                 await sleep(250);
@@ -1254,6 +1287,26 @@
                     if (app._getVideoEl()) {
                         stepReady = true;
                         break;
+                    }
+                }
+                if (previousCell && currentActiveCell() && currentActiveCell() !== previousCell) {
+                    stepReady = true;
+                    break;
+                }
+                if (previousStep === '章节测验' && currentStep === '章节测验' && !quizCompleted()) {
+                    stepReady = true;
+                    break;
+                }
+                if (Date.now() - lastClickAt > 4000 && retries < 10) {
+                    const retryButton = findNextButton();
+                    if (retryButton) {
+                        retries++;
+                        retryButton.scrollIntoView({ block: 'center' });
+                        clickElement(retryButton);
+                        lastClickAt = Date.now();
+                        log('warn', `“下一节”点击未生效，重试第 ${retries} 次`);
+                    } else {
+                        lastClickAt = Date.now();
                     }
                 }
                 if (attempt > 0 && attempt % 40 === 0) {
@@ -1829,7 +1882,7 @@
                 }
                 this._chapterAdvanceTimes++;
                 const previousStep = this._currentStepTitle();
-                nextButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                clickElement(nextButton);
                 const started = Date.now();
                 const timer = setInterval(() => {
                     if (this._currentStepTitle() !== previousStep || Date.now() - started > 8000) {

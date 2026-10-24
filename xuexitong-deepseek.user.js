@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通自动刷课脚本
 // @namespace    github.aajddjkfkfke.xuexitong
-// @version      1.0.4
+// @version      1.0.5
 // @description  学习通视频自动播放 + 章节测验 DeepSeek 作答；右侧可视化面板，API Key 保存在油猴本地存储，无需本地服务与 F12 控制台
 // @author       aajddjkfkfke
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -26,7 +26,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.0.4';
+    const VERSION = '1.0.5';
     const BOOT_KEY = '__xuexitongDeepSeekPanelBooted';
     const API_URL = 'https://api.deepseek.com/chat/completions';
     const MODELS_URL = 'https://api.deepseek.com/models';
@@ -1464,7 +1464,7 @@
             },
             _startInlineQuizWatch() {
                 if (this._inlineQuizTimer) return;
-                this._inlineQuizTimer = setInterval(() => this._maybeSolveInlineQuiz(), 700);
+                this._inlineQuizTimer = setInterval(() => this._maybeSolveInlineQuiz(), 500);
             },
             _maybeSolveInlineQuiz() {
                 if (this._inlineQuizBusy || this._destroyed) return;
@@ -1522,6 +1522,11 @@
                         try {
                             video.pause();
                             log('info', '已暂停视频，等待弹题作答');
+                            this._inlinePauseCheckTimer = setTimeout(() => {
+                                if (this._inlineQuizBusy && !video.paused) {
+                                    log('warn', '弹题期间播放器又自动恢复了播放，倒计时可能继续');
+                                }
+                            }, 700);
                         } catch (error) {
                             /* 忽略 */
                         }
@@ -1573,7 +1578,7 @@
                     const currentSubmit = findButtonContaining(submitRoot, '提交') ||
                         findButtonContaining(submitRoot, '交卷') || submit;
                     if (!currentSubmit || !currentSubmit.isConnected) throw new Error('弹题已关闭（可能超时），未提交');
-                    const minDelay = 2800 + Math.random() * 800;
+                    const minDelay = 400 + Math.random() * 300;
                     const elapsed = Date.now() - (this._inlineDetectedAt || Date.now());
                     const waitMs = Math.max(0, minDelay - elapsed);
                     if (waitMs > 0) {
@@ -1581,6 +1586,10 @@
                         await sleep(waitMs);
                     }
                     await waitFor(() => !currentSubmit.disabled, 2000, 100);
+                    if (this._inlinePauseCheckTimer) {
+                        clearTimeout(this._inlinePauseCheckTimer);
+                        this._inlinePauseCheckTimer = null;
+                    }
                     currentSubmit.scrollIntoView({ block: 'center' });
                     const beforeTime = Number(this._getVideoEl()?.currentTime || 0);
                     currentSubmit.click();
@@ -1627,8 +1636,8 @@
                     video.muted = true;
                     video.defaultMuted = true;
                     video.volume = 0;
-                    if (video.paused && this._isPlaying) {
-                        this._tryResumePlayback('paused');
+                    if (video.paused) {
+                        /* 页面已自行暂停，保持暂停 */
                     } else if (this._isPlaying && !video.ended) {
                         const now = Date.now();
                         const current = Number(video.currentTime || 0);
@@ -1670,6 +1679,7 @@
             _inlineStructureWarned: false,
             _inlineKeyWarned: false,
             _inlineDetectedAt: 0,
+            _inlinePauseCheckTimer: null,
             _guardLastTime: 0,
             _guardLastWallTs: 0,
             _guardLastResumeTs: 0,
@@ -2019,7 +2029,10 @@
                 }
             },
             _handleVideoPause() {
+                if (this._inlineQuizBusy) return;
                 if (!this._isPlaying) return;
+                this._isPlaying = false;
+                log('info', '视频已暂停');
             },
             _handleVideoRateChange() {
                 const rate = Number(settings.rate) || 0;

@@ -722,6 +722,21 @@
         throw new Error(`${lastProblem}；重试后仍未获得完整答案，未选择或提交题目`);
     }
 
+    async function askAnswers(questions) {
+        let rawAnswers = await requestAnswers(questions);
+        let mismatches = findThemeMismatches(questions, rawAnswers);
+        if (mismatches.length) {
+            log('warn', `还原结果与选项主题不一致：${mismatches.map((item) => `第${item.id}题(${item.theme})`).join('、')}，重试一次`);
+            const hint = `上一轮还原与选项主题不一致：${mismatches.map((item) => `第${item.id}题写成“${truncate(item.restored || '空', 24)}”，选项共同词是“${item.theme}”`).join('；')}。请严格按 theme 重新还原题干并作答，restored 必须包含 theme，不要沿用上一轮的错误还原。`;
+            rawAnswers = await requestAnswers(questions, hint);
+            mismatches = findThemeMismatches(questions, rawAnswers);
+        }
+        if (mismatches.length) {
+            throw new Error(`题干还原与选项主题不一致（${mismatches.map((item) => `第${item.id}题:${item.theme}`).join('、')}），已停止提交，请核对题目`);
+        }
+        return { answers: validateAnswers(questions, rawAnswers), rawAnswers };
+    }
+
     /* ---------------------------------------------------------- 页面自动化 */
 
     const $ = (...args) => {
@@ -813,7 +828,9 @@
             const seenCards = new Set();
             let node;
             while ((node = walker.nextNode())) {
-                const kind = clean(node.textContent).match(kindPattern)?.[1];
+                const nodeText = clean(node.textContent);
+                const kind = nodeText.match(kindPattern)?.[1] ||
+                    (/^(单选题|多选题|判断题)(?:\s*[（(].*)?$/.test(nodeText) ? nodeText.match(/^(单选题|多选题|判断题)/)[1] : '');
                 if (!kind || !visible(node.parentElement)) continue;
                 let card = node.parentElement;
                 let options = [];
@@ -830,7 +847,9 @@
                 const firstOption = full.search(/(?:^|\n)\s*A\s*(?:[.、．]|\S)/);
                 const title = clean(firstOption >= 0 ? full.slice(0, firstOption) :
                     (node.parentElement.innerText || full))
-                    .replace(/^\d+\s*/, '').replace(kindPattern, '').trim();
+                    .replace(/^\d+\s*/, '')
+                    .replace(/^(单选题|多选题|判断题)\s*/, '')
+                    .replace(kindPattern, '').trim();
                 if (!title || title.length > 500 || options.some((option) => !option.text || option.text.length > 500)) continue;
                 let finalTitle = title;
                 const theme = commonOptionSuffix(options);
@@ -915,6 +934,28 @@
                 lastNextPopupClickAt = Date.now();
                 log('info', `确认浮层：点击“${clean(overlay.innerText)}”`);
                 overlay.click();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function confirmInlineSubmit(doc) {
+        const platformButton = doc.querySelector('#popok');
+        if (platformButton && visible(platformButton)) {
+            platformButton.click();
+            return true;
+        }
+        const dialogs = Array.from(doc.querySelectorAll(
+            '[role="dialog"],[role="alertdialog"],.layui-layer-dialog,.layui-layer-page,.el-message-box,.modal,.ans-dialog,.ant-modal'
+        ));
+        for (const dialog of dialogs) {
+            if (!visible(dialog)) continue;
+            const text = clean(dialog.innerText);
+            if (!text || text.length > 200 || !/提交|确定|确认|继续|回答|正确|错误/.test(text)) continue;
+            const confirm = findConfirmButton(dialog);
+            if (confirm) {
+                confirm.click();
                 return true;
             }
         }
@@ -1050,6 +1091,7 @@
                 }
             }
         }
+        app._selectAnswers = selectAnswers;
 
         async function confirmSubmitDialog() {
             for (let attempt = 0; attempt < 20; attempt++) {
@@ -1219,18 +1261,7 @@
                 log('info', `识别到 ${questions.length} 道题，开始请求 DeepSeek`);
                 log('info', '题干若含替换字，模型会先还原再作答，下面会显示还原结果');
                 setActivity(`识别到 ${questions.length} 道题，等待 DeepSeek 作答…`);
-                let rawAnswers = await requestAnswers(questions);
-                let mismatches = findThemeMismatches(questions, rawAnswers);
-                if (mismatches.length) {
-                    log('warn', `还原结果与选项主题不一致：${mismatches.map((item) => `第${item.id}题(${item.theme})`).join('、')}，重试一次`);
-                    const hint = `上一轮还原与选项主题不一致：${mismatches.map((item) => `第${item.id}题写成“${truncate(item.restored || '空', 24)}”，选项共同词是“${item.theme}”`).join('；')}。请严格按 theme 重新还原题干并作答，restored 必须包含 theme，不要沿用上一轮的错误还原。`;
-                    rawAnswers = await requestAnswers(questions, hint);
-                    mismatches = findThemeMismatches(questions, rawAnswers);
-                }
-                if (mismatches.length) {
-                    throw new Error(`题干还原与选项主题不一致（${mismatches.map((item) => `第${item.id}题:${item.theme}`).join('、')}），已停止提交，请核对题目`);
-                }
-                const answers = validateAnswers(questions, rawAnswers);
+                const { answers, rawAnswers } = await askAnswers(questions);
                 const restoredById = new Map(rawAnswers
                     .filter((item) => typeof item.restored === 'string' && item.restored.trim())
                     .map((item) => [item.id, item.restored.trim()]));
@@ -1291,6 +1322,7 @@
                 return this._cellData;
             },
             run() {
+                this._destroyed = false;
                 log('success', '=== 学习通自动刷课已启动 ===');
                 this._nextUnitPending = false;
                 this._chapterAdvanceTimes = 0;
@@ -1301,6 +1333,7 @@
                 this._getVideoEl();
                 this._clearCheckInterval();
                 this._bindStepNavigation();
+                this._startInlineQuizWatch();
                 this.play();
             },
             nextUnit() {
@@ -1349,7 +1382,83 @@
                     this._checkVideoStatus();
                 }, this.configs.videoCheckInterval);
             },
+            _startInlineQuizWatch() {
+                if (this._inlineQuizTimer) return;
+                this._inlineQuizTimer = setInterval(() => this._maybeSolveInlineQuiz(), 700);
+            },
+            _maybeSolveInlineQuiz() {
+                if (this._inlineQuizBusy || this._destroyed) return;
+                try {
+                    if (this._isChapterTest()) return;
+                    const questions = extractQuestions();
+                    if (!questions.length) return;
+                    const submitDoc = courseDocuments().find((doc) => findButton(doc, '提交'));
+                    if (!submitDoc) return;
+                    const submit = findButton(submitDoc, '提交');
+                    if (!submit || !visible(submit)) return;
+                    const signature = questions.map((question) => `${question.kind}:${question.title}:${question.options.length}`).join('|');
+                    if (this._inlineSignatures.has(signature)) return;
+                    this._inlineSignatures.add(signature);
+                    this._inlineQuizBusy = true;
+                    this._solveInlineQuiz(questions, submitDoc, submit, signature);
+                } catch (error) {
+                    log('error', `视频弹题检测失败：${error.message || error}`);
+                }
+            },
+            async _solveInlineQuiz(questions, submitDoc, submit, signature) {
+                try {
+                    log('info', `检测到视频弹题（${questions.length} 道），开始作答`);
+                    const first = questions[0];
+                    const sample = first ? [first.title, ...first.options.map((option) => option.text)].join(' ') : '';
+                    const decoder = await (async () => {
+                        try {
+                            return await ensureFontDecoder(sample, first?.card);
+                        } catch (error) {
+                            return null;
+                        }
+                    })();
+                    if (decoder) {
+                        for (const question of questions) {
+                            question.title = decoder.decode(question.title);
+                            for (const option of question.options) option.text = decoder.decode(option.text);
+                        }
+                        log('info', '已用页面字体映射还原视频弹题');
+                    }
+                    const { answers } = await askAnswers(questions);
+                    for (let index = 0; index < questions.length; index++) {
+                        log('info', `弹题 ${index + 1}. [${questions[index].kind}] ${truncate(questions[index].title, 34)} → ${answers.get(index + 1).join('')}`);
+                    }
+                    if (typeof this._selectAnswers === 'function') {
+                        await this._selectAnswers(questions, answers);
+                    } else {
+                        for (let index = 0; index < questions.length; index++) {
+                            for (const letter of answers.get(index + 1)) {
+                                const option = questions[index].options.find((item) => item.letter === letter);
+                                if (option?.element?.isConnected) {
+                                    option.element.click();
+                                    await sleep(120);
+                                }
+                            }
+                        }
+                    }
+                    const currentSubmit = findButton(submitDoc, '提交') || submit;
+                    await waitFor(() => !currentSubmit.disabled, 2000, 100);
+                    currentSubmit.scrollIntoView({ block: 'center' });
+                    currentSubmit.click();
+                    log('info', '视频弹题已提交');
+                    await sleep(300);
+                    if (visible(currentSubmit)) confirmInlineSubmit(submitDoc);
+                    const closed = await waitFor(() => !visible(currentSubmit) || !findButton(submitDoc, '提交'), 5000);
+                    if (!closed) log('warn', '视频弹题提交后仍显示，请手动核对');
+                } catch (error) {
+                    log('error', `视频弹题作答失败：${error.message || error}`);
+                } finally {
+                    this._inlineQuizBusy = false;
+                    if (!this._destroyed) setTimeout(() => this.play(), 300);
+                }
+            },
             _tryResumePlayback(reason) {
+                if (this._inlineQuizBusy) return;
                 const now = Date.now();
                 if (now - this._guardLastResumeTs < this.configs.guardResumeCooldownMs) return;
                 this._guardLastResumeTs = now;
@@ -1369,6 +1478,7 @@
                 try {
                     const video = this._getVideoEl();
                     if (!video) return;
+                    if (this._inlineQuizBusy) return;
                     applyPlaybackRate(video);
                     video.muted = true;
                     video.defaultMuted = true;
@@ -1409,10 +1519,14 @@
             _delayedNextUnitTimer: null,
             _playPending: null,
             _transientPlayAttempts: 0,
+            _inlineQuizTimer: null,
+            _inlineQuizBusy: false,
+            _inlineSignatures: new Set(),
             _guardLastTime: 0,
             _guardLastWallTs: 0,
             _guardLastResumeTs: 0,
             async play() {
+                if (this._destroyed || this._inlineQuizBusy) return;
                 if (this._playPending) return this._playPending;
                 this._playPending = this._playOnce().finally(() => {
                     this._playPending = null;
@@ -1797,6 +1911,12 @@
                 document.addEventListener('visibilitychange', resumePlaybackNow);
             },
             destroy() {
+                this._destroyed = true;
+                if (this._inlineQuizTimer) {
+                    clearInterval(this._inlineQuizTimer);
+                    this._inlineQuizTimer = null;
+                }
+                this._inlineQuizBusy = false;
                 this._isPlaying = false;
                 this._clearCheckInterval();
                 this._detachVideoEvents();

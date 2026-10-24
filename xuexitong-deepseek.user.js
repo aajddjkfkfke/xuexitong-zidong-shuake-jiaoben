@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通自动刷课脚本
 // @namespace    github.aajddjkfkfke.xuexitong
-// @version      1.0.3
+// @version      1.0.4
 // @description  学习通视频自动播放 + 章节测验 DeepSeek 作答；右侧可视化面板，API Key 保存在油猴本地存储，无需本地服务与 F12 控制台
 // @author       aajddjkfkfke
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -26,7 +26,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.0.3';
+    const VERSION = '1.0.4';
     const BOOT_KEY = '__xuexitongDeepSeekPanelBooted';
     const API_URL = 'https://api.deepseek.com/chat/completions';
     const MODELS_URL = 'https://api.deepseek.com/models';
@@ -1512,6 +1512,7 @@
                         return;
                     }
                     this._inlineKeyWarned = false;
+                    this._inlineDetectedAt = Date.now();
                     const signature = questions.map((question) => `${question.kind}:${question.title}:${question.options.length}`).join('|');
                     const attempts = this._inlineAttempts.get(signature) || 0;
                     if (attempts >= 3) return;
@@ -1572,12 +1573,24 @@
                     const currentSubmit = findButtonContaining(submitRoot, '提交') ||
                         findButtonContaining(submitRoot, '交卷') || submit;
                     if (!currentSubmit || !currentSubmit.isConnected) throw new Error('弹题已关闭（可能超时），未提交');
+                    const minDelay = 2800 + Math.random() * 800;
+                    const elapsed = Date.now() - (this._inlineDetectedAt || Date.now());
+                    const waitMs = Math.max(0, minDelay - elapsed);
+                    if (waitMs > 0) {
+                        log('info', `等待 ${(waitMs / 1000).toFixed(1)} 秒后提交，避免判定答题过快`);
+                        await sleep(waitMs);
+                    }
                     await waitFor(() => !currentSubmit.disabled, 2000, 100);
                     currentSubmit.scrollIntoView({ block: 'center' });
+                    const beforeTime = Number(this._getVideoEl()?.currentTime || 0);
                     currentSubmit.click();
                     log('info', '视频弹题已提交');
                     await sleep(300);
                     if (visible(currentSubmit)) confirmInlineSubmit(submitRoot);
+                    const afterTime = Number(this._getVideoEl()?.currentTime || 0);
+                    if (afterTime < beforeTime - 1.5) {
+                        log('warn', `提交后视频回退 ${(beforeTime - afterTime).toFixed(1)} 秒，可能是平台回放或判定答题过快`);
+                    }
                     const closed = await waitFor(() => !visible(currentSubmit) ||
                         (!findButtonContaining(submitRoot, '提交') && !findButtonContaining(submitRoot, '交卷')), 5000);
                     if (!closed) log('warn', '视频弹题提交后仍显示，请手动核对');
@@ -1656,6 +1669,7 @@
             _inlineAnswerCache: new Map(),
             _inlineStructureWarned: false,
             _inlineKeyWarned: false,
+            _inlineDetectedAt: 0,
             _guardLastTime: 0,
             _guardLastWallTs: 0,
             _guardLastResumeTs: 0,

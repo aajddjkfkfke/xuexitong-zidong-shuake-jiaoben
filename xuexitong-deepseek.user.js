@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通自动刷课脚本
 // @namespace    github.aajddjkfkfke.xuexitong
-// @version      1.0
+// @version      1.0.1
 // @description  学习通视频自动播放 + 章节测验 DeepSeek 作答；右侧可视化面板，API Key 保存在油猴本地存储，无需本地服务与 F12 控制台
 // @author       aajddjkfkfke
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -26,7 +26,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.0';
+    const VERSION = '1.0.1';
     const BOOT_KEY = '__xuexitongDeepSeekPanelBooted';
     const API_URL = 'https://api.deepseek.com/chat/completions';
     const MODELS_URL = 'https://api.deepseek.com/models';
@@ -783,6 +783,34 @@
         return result;
     }
 
+    function deepDocuments() {
+        const result = [];
+        const visit = (root, depth) => {
+            if (!root || depth > 6 || result.includes(root)) return;
+            if (root.host && root.host.id === 'xt-ds-host') return;
+            result.push(root);
+            let elements = [];
+            try {
+                elements = Array.from(root.querySelectorAll('*'));
+            } catch (error) {
+                return;
+            }
+            for (const element of elements) {
+                if (element.id === 'xt-ds-host') continue;
+                if (element.shadowRoot) visit(element.shadowRoot, depth + 1);
+            }
+            for (const frame of root.querySelectorAll('iframe')) {
+                try {
+                    visit(frame.contentDocument, depth + 1);
+                } catch (error) {
+                    /* 跨域框架忽略 */
+                }
+            }
+        };
+        visit(document, 0);
+        return result;
+    }
+
     function quizCompleted() {
         const scoreShown = courseDocuments().some((doc) => {
             const text = clean(doc.body?.innerText);
@@ -820,11 +848,14 @@
         return Array.from(found.values()).sort((a, b) => a.letter.localeCompare(b.letter));
     }
 
-    function extractQuestions() {
+    function extractQuestions(deep = false) {
         const questions = [];
-        for (const doc of courseDocuments()) {
-            if (!doc.body) continue;
-            const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+        for (const doc of (deep ? deepDocuments() : courseDocuments())) {
+            const body = doc.body || doc;
+            if (!body) continue;
+            const walker = typeof doc.createTreeWalker === 'function'
+                ? doc.createTreeWalker(body, NodeFilter.SHOW_TEXT)
+                : document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
             const seenCards = new Set();
             let node;
             while ((node = walker.nextNode())) {
@@ -874,6 +905,55 @@
             .filter((element) => visible(element) && clean(element.value || element.innerText) === label);
         return candidates.find((element) => /^(BUTTON|A|INPUT)$/.test(element.tagName)) ||
             candidates.find((element) => !Array.from(element.children).some((child) => clean(child.innerText) === label)) || null;
+    }
+
+    function findButtonContaining(doc, label) {
+        const match = (element) => visible(element) && clean(element.value || element.innerText).includes(label);
+        const primary = Array.from(doc.querySelectorAll('button,a,input[type="button"],input[type="submit"],[role="button"]')).filter(match);
+        if (primary.length) return primary.find((element) => /^(BUTTON|A|INPUT)$/.test(element.tagName)) || primary[0];
+        const styled = Array.from(doc.querySelectorAll('[class*="btn"],[class*="button"],[class*="submit"]')).filter(match);
+        if (styled.length) return styled[0];
+        const clickable = Array.from(doc.querySelectorAll('div,span'))
+            .filter((element) => match(element) && (element.onclick || getComputedStyle(element).cursor === 'pointer'));
+        return clickable[0] || null;
+    }
+
+    function extractQuestionNearSubmit(submit) {
+        let container = submit?.parentElement;
+        for (let depth = 0; depth < 6 && container; depth++, container = container.parentElement) {
+            if (!container || container === document.body) break;
+            const text = clean(container.innerText);
+            if (text.length < 6 || text.length > 1000) continue;
+            let options = optionElements(container);
+            if (options.length < 2) {
+                const inputs = Array.from(container.querySelectorAll('input[type="radio"],input[type="checkbox"]'))
+                    .filter((input) => visible(input));
+                if (inputs.length >= 2) {
+                    options = inputs.map((input, index) => {
+                        const label = input.closest('label') ||
+                            (input.id ? container.querySelector(`label[for="${String(input.id).replace(/"/g, '\\"')}"]`) : null) ||
+                            input.nextElementSibling || input.parentElement;
+                        const letter = String.fromCharCode(65 + index);
+                        const value = clean(label?.innerText || input.value || '');
+                        return value ? { letter, text: value.replace(new RegExp(`^${letter}[.、．]?\\s*`), ''), element: label || input } : null;
+                    }).filter(Boolean);
+                }
+            }
+            if (options.length < 2 || options.length > 8) continue;
+            const kindText = clean(container.innerText);
+            const judge = options.length === 2 &&
+                options.some((option) => /^对$/.test(option.text)) &&
+                options.some((option) => /^错$/.test(option.text));
+            const kind = /多选/.test(kindText) ? '多选题' : (/判断/.test(kindText) || judge) ? '判断题' : '单选题';
+            const title = kindText
+                .replace(/^(单选题|多选题|判断题)\s*/, '')
+                .replace(/\s*A\s*[、.．]?\s*[\u4e00-\u9fff][\s\S]*$/, '')
+                .replace(/(?:^|\n)\s*(提交|交卷)[\s\S]*$/, '')
+                .trim();
+            if (title.length < 2) continue;
+            return { kind, title: title.slice(0, 500), options, card: container, doc: container.ownerDocument };
+        }
+        return null;
     }
 
     function findNextButton() {
@@ -1390,22 +1470,42 @@
                 if (this._inlineQuizBusy || this._destroyed) return;
                 try {
                     if (this._isChapterTest()) return;
-                    const questions = extractQuestions();
-                    if (!questions.length) return;
-                    const submitDoc = courseDocuments().find((doc) => findButton(doc, '提交'));
-                    if (!submitDoc) return;
-                    const submit = findButton(submitDoc, '提交');
-                    if (!submit || !visible(submit)) return;
+                    const questions = extractQuestions(true);
+                    const docs = deepDocuments();
+                    let submitRoot = null;
+                    let submit = null;
+                    for (const doc of docs) {
+                        const candidate = findButtonContaining(doc, '提交') || findButtonContaining(doc, '交卷');
+                        if (candidate && visible(candidate)) {
+                            submitRoot = doc;
+                            submit = candidate;
+                            break;
+                        }
+                    }
+                    if (!submit) return;
+                    if (!questions.length) {
+                        const fallback = extractQuestionNearSubmit(submit);
+                        if (fallback) questions.push(fallback);
+                    }
+                    if (!questions.length) {
+                        const container = submit.parentElement?.parentElement;
+                        const text = clean(container?.innerText || '');
+                        if (text && !this._inlineStructureWarned) {
+                            this._inlineStructureWarned = true;
+                            log('warn', `检测到提交按钮但题目结构未识别：${truncate(text, 80)}`);
+                        }
+                        return;
+                    }
                     const signature = questions.map((question) => `${question.kind}:${question.title}:${question.options.length}`).join('|');
                     if (this._inlineSignatures.has(signature)) return;
                     this._inlineSignatures.add(signature);
                     this._inlineQuizBusy = true;
-                    this._solveInlineQuiz(questions, submitDoc, submit, signature);
+                    this._solveInlineQuiz(questions, submitRoot, submit, signature);
                 } catch (error) {
                     log('error', `视频弹题检测失败：${error.message || error}`);
                 }
             },
-            async _solveInlineQuiz(questions, submitDoc, submit, signature) {
+            async _solveInlineQuiz(questions, submitRoot, submit, signature) {
                 try {
                     log('info', `检测到视频弹题（${questions.length} 道），开始作答`);
                     const first = questions[0];
@@ -1441,14 +1541,16 @@
                             }
                         }
                     }
-                    const currentSubmit = findButton(submitDoc, '提交') || submit;
+                    const currentSubmit = findButtonContaining(submitRoot, '提交') ||
+                        findButtonContaining(submitRoot, '交卷') || submit;
                     await waitFor(() => !currentSubmit.disabled, 2000, 100);
                     currentSubmit.scrollIntoView({ block: 'center' });
                     currentSubmit.click();
                     log('info', '视频弹题已提交');
                     await sleep(300);
-                    if (visible(currentSubmit)) confirmInlineSubmit(submitDoc);
-                    const closed = await waitFor(() => !visible(currentSubmit) || !findButton(submitDoc, '提交'), 5000);
+                    if (visible(currentSubmit)) confirmInlineSubmit(submitRoot);
+                    const closed = await waitFor(() => !visible(currentSubmit) ||
+                        (!findButtonContaining(submitRoot, '提交') && !findButtonContaining(submitRoot, '交卷')), 5000);
                     if (!closed) log('warn', '视频弹题提交后仍显示，请手动核对');
                 } catch (error) {
                     log('error', `视频弹题作答失败：${error.message || error}`);
@@ -1522,6 +1624,7 @@
             _inlineQuizTimer: null,
             _inlineQuizBusy: false,
             _inlineSignatures: new Set(),
+            _inlineStructureWarned: false,
             _guardLastTime: 0,
             _guardLastWallTs: 0,
             _guardLastResumeTs: 0,
@@ -2541,6 +2644,20 @@
             }
         } else {
             lines.push('未找到题目卡片，请在章节测验页运行');
+        }
+        try {
+            let found = 0;
+            for (const doc of deepDocuments()) {
+                const submit = findButtonContaining(doc, '提交');
+                if (submit && visible(submit)) {
+                    const container = submit.parentElement?.parentElement;
+                    lines.push(`提交按钮：<${submit.tagName}> ${truncate(clean(submit.innerText || submit.value), 20)}｜容器：${truncate(clean(container?.innerText), 80)}`);
+                    found++;
+                    if (found >= 3) break;
+                }
+            }
+        } catch (error) {
+            /* 忽略 */
         }
         log('info', '=== 字体/伪元素诊断 ===');
         lines.slice(0, 30).forEach((line) => log('info', line));

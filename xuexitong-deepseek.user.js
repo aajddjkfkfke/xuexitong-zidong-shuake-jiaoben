@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通自动刷课脚本
 // @namespace    github.aajddjkfkfke.xuexitong
-// @version      1.0.1
+// @version      1.0.2
 // @description  学习通视频自动播放 + 章节测验 DeepSeek 作答；右侧可视化面板，API Key 保存在油猴本地存储，无需本地服务与 F12 控制台
 // @author       aajddjkfkfke
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -26,7 +26,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.0.1';
+    const VERSION = '1.0.2';
     const BOOT_KEY = '__xuexitongDeepSeekPanelBooted';
     const API_URL = 'https://api.deepseek.com/chat/completions';
     const MODELS_URL = 'https://api.deepseek.com/models';
@@ -1497,8 +1497,18 @@
                         return;
                     }
                     const signature = questions.map((question) => `${question.kind}:${question.title}:${question.options.length}`).join('|');
-                    if (this._inlineSignatures.has(signature)) return;
-                    this._inlineSignatures.add(signature);
+                    const attempts = this._inlineAttempts.get(signature) || 0;
+                    if (attempts >= 3) return;
+                    this._inlineAttempts.set(signature, attempts + 1);
+                    const video = this._getVideoEl();
+                    if (video && !video.paused) {
+                        try {
+                            video.pause();
+                            log('info', '已暂停视频，等待弹题作答');
+                        } catch (error) {
+                            /* 忽略 */
+                        }
+                    }
                     this._inlineQuizBusy = true;
                     this._solveInlineQuiz(questions, submitRoot, submit, signature);
                 } catch (error) {
@@ -1509,22 +1519,24 @@
                 try {
                     log('info', `检测到视频弹题（${questions.length} 道），开始作答`);
                     const first = questions[0];
-                    const sample = first ? [first.title, ...first.options.map((option) => option.text)].join(' ') : '';
-                    const decoder = await (async () => {
-                        try {
-                            return await ensureFontDecoder(sample, first?.card);
-                        } catch (error) {
-                            return null;
-                        }
-                    })();
+                    const decoder = fontDecoderCache.decoder;
                     if (decoder) {
                         for (const question of questions) {
                             question.title = decoder.decode(question.title);
                             for (const option of question.options) option.text = decoder.decode(option.text);
                         }
-                        log('info', '已用页面字体映射还原视频弹题');
+                        log('info', '已用缓存的字体映射还原视频弹题');
                     }
-                    const { answers } = await askAnswers(questions);
+                    const { answers } = await (async () => {
+                        const cached = this._inlineAnswerCache.get(signature);
+                        if (cached) {
+                            log('info', '使用已缓存的弹题答案');
+                            return { answers: cached };
+                        }
+                        const result = await askAnswers(questions);
+                        this._inlineAnswerCache.set(signature, result.answers);
+                        return result;
+                    })();
                     for (let index = 0; index < questions.length; index++) {
                         log('info', `弹题 ${index + 1}. [${questions[index].kind}] ${truncate(questions[index].title, 34)} → ${answers.get(index + 1).join('')}`);
                     }
@@ -1543,6 +1555,7 @@
                     }
                     const currentSubmit = findButtonContaining(submitRoot, '提交') ||
                         findButtonContaining(submitRoot, '交卷') || submit;
+                    if (!currentSubmit || !currentSubmit.isConnected) throw new Error('弹题已关闭（可能超时），未提交');
                     await waitFor(() => !currentSubmit.disabled, 2000, 100);
                     currentSubmit.scrollIntoView({ block: 'center' });
                     currentSubmit.click();
@@ -1623,7 +1636,8 @@
             _transientPlayAttempts: 0,
             _inlineQuizTimer: null,
             _inlineQuizBusy: false,
-            _inlineSignatures: new Set(),
+            _inlineAttempts: new Map(),
+            _inlineAnswerCache: new Map(),
             _inlineStructureWarned: false,
             _guardLastTime: 0,
             _guardLastWallTs: 0,

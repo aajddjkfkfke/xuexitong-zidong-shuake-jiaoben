@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通自动刷课脚本
 // @namespace    github.aajddjkfkfke.xuexitong
-// @version      1.0.6
+// @version      1.0.7
 // @description  学习通视频自动播放 + 章节测验 DeepSeek 作答；右侧可视化面板，API Key 保存在油猴本地存储，无需本地服务与 F12 控制台
 // @author       aajddjkfkfke
 // @match        *://*.chaoxing.com/mycourse/studentstudy*
@@ -26,7 +26,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.0.6';
+    const VERSION = '1.0.7';
     const BOOT_KEY = '__xuexitongDeepSeekPanelBooted';
     const API_URL = 'https://api.deepseek.com/chat/completions';
     const MODELS_URL = 'https://api.deepseek.com/models';
@@ -256,6 +256,34 @@
         return suffix;
     }
 
+    const TRUSTED_THEMES = new Set([
+        '铁路', '公路', '道路', '航线', '主义', '思想', '理论', '制度', '会议', '政策',
+        '方针', '路线', '革命', '建设', '发展', '社会', '资本', '市场', '经济', '政治',
+        '文化', '历史', '人民', '国家', '政府', '法律', '权利', '义务', '关系', '问题',
+        '方法', '原则', '目标', '任务', '阶段', '时期', '过程', '结果', '原因', '条件',
+        '特点', '性质', '作用', '意义', '影响', '地位', '标准', '形式', '内容', '结构',
+        '功能', '系统', '模式', '方向', '基础', '核心', '关键', '重点', '难点', '科学',
+        '技术', '教育', '管理', '组织', '机构', '产品', '质量', '成本', '价格', '货币',
+        '银行', '企业', '工厂', '农村', '城市', '地区', '世界', '中国', '美国', '英国',
+        '法国', '德国', '日本', '俄罗斯', '欧洲', '亚洲', '非洲', '美洲', '大学', '中学',
+        '小学', '学生', '教师', '课程', '考试', '成绩', '学习', '研究', '实验', '数据',
+        '网络', '信息', '软件', '硬件', '程序', '算法', '模型', '材料', '能源', '环境',
+        '生态', '资源', '人口', '家庭', '婚姻', '道德', '哲学', '宗教', '艺术', '文学',
+        '语言', '文字', '新闻', '媒体', '传播', '广告', '消费', '生产', '分配', '交换',
+        '劳动', '工作', '职业', '收入', '税收', '财政', '金融', '投资', '贸易', '物流',
+        '交通', '运输', '航空', '航天', '军事', '战争', '和平', '安全', '改革', '开放',
+        '创新', '合作', '竞争', '效率', '公平', '正义', '自由', '平等', '民主', '法治',
+        '文明', '和谐', '诚信', '友善', '爱国', '敬业', '奉献', '责任',
+    ]);
+
+    function themeIsTrusted(theme) {
+        if (TRUSTED_THEMES.has(theme)) return true;
+        for (const word of TRUSTED_THEMES) {
+            if (theme.length > word.length && theme.endsWith(word)) return true;
+        }
+        return false;
+    }
+
     const SYSTEM_PROMPT = '按题意回答全部题目。注意：题干或选项可能经过网页防复制处理，出现整句汉字被替换成部首不同、语义不通的字（例如把“中国特色社会主义”写成“中国悺悷社会主悴”），也可能夹杂无关字。请先利用固定搭配、课程术语和选项反推原句，再按还原后的题意作答；不要把替换字当作专业术语，也不要因无法逐字还原而放弃。每题通常带 theme 字段，表示选项共同后缀（如“铁路”“主义”）；restored 必须包含 theme，题干主题也必须与 theme 一致，若可读字与 theme 冲突，以 theme 为准（例如 theme 为“铁路”、可读字含“电气”时，应还原成“电气化铁路”，不应写成电子计算机）。每题都必须给非空答案，只用该题提供的选项字母且不可重复；单选和判断选一个，多选列出所有正确项。不确定时选最可能的答案。answers 每项除 id、letters 外，再加 restored 字段，写入你还原后的题干（不超过50字）。只输出JSON：{"answers":[{"id":1,"letters":["A"],"restored":"还原后的题干"}]}。';
 
     function buildRequestBody(questions, hint = '') {
@@ -267,7 +295,7 @@
                 options: question.options.map((option) => ({ letter: option.letter, text: option.text })),
             };
             const theme = commonOptionSuffix(question.options);
-            if (theme) item.theme = theme;
+            if (theme && themeIsTrusted(theme)) item.theme = theme;
             return item;
         });
         return {
@@ -292,7 +320,7 @@
         const result = [];
         for (let index = 0; index < questions.length; index++) {
             const theme = commonOptionSuffix(questions[index].options);
-            if (!theme) continue;
+            if (!theme || !themeIsTrusted(theme)) continue;
             const restored = String(byId.get(index + 1)?.restored || '');
             if (!restored.includes(theme)) result.push({ id: index + 1, theme, restored });
         }
@@ -723,6 +751,12 @@
     }
 
     async function askAnswers(questions) {
+        const looseThemes = questions
+            .map((question) => commonOptionSuffix(question.options))
+            .filter((theme) => theme && !themeIsTrusted(theme));
+        if (looseThemes.length) {
+            log('warn', `选项主题“${Array.from(new Set(looseThemes)).join('、')}”不在常见词表，跳过主题一致性校验`);
+        }
         let rawAnswers = await requestAnswers(questions);
         let mismatches = findThemeMismatches(questions, rawAnswers);
         if (mismatches.length) {
